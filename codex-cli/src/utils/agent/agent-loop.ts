@@ -21,8 +21,8 @@ import {
   AZURE_OPENAI_API_VERSION,
 } from "../config.js";
 import { log } from "../logger/log.js";
+import modelApiAdapter from "../model-api-adapter.js";
 import { parseToolCallArguments } from "../parsers.js";
-import { responsesCreateViaChatCompletions } from "../responses.js";
 import {
   ORIGIN,
   getSessionId,
@@ -779,35 +779,35 @@ export class AgentLoop {
 
         // Retry loop for transient errors. Up to MAX_RETRIES attempts.
         const MAX_RETRIES = 8;
+        // Prepare variables outside the retry loop for use in fallback
+        let reasoning: Reasoning | undefined;
+        let modelSpecificInstructions: string | undefined;
+        if (this.model.startsWith("o") || this.model.startsWith("codex")) {
+          reasoning = { effort: this.config.reasoningEffort ?? "medium" };
+          reasoning.summary = "auto";
+        }
+        if (this.model.startsWith("gpt-4.1")) {
+          modelSpecificInstructions = applyPatchToolInstructions;
+        }
+        const mergedInstructions = [
+          prefix,
+          modelSpecificInstructions,
+          this.instructions,
+        ]
+          .filter(Boolean)
+          .join("\n");
+
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
           try {
-            let reasoning: Reasoning | undefined;
-            let modelSpecificInstructions: string | undefined;
-            if (this.model.startsWith("o") || this.model.startsWith("codex")) {
-              reasoning = { effort: this.config.reasoningEffort ?? "medium" };
-              reasoning.summary = "auto";
-            }
-            if (this.model.startsWith("gpt-4.1")) {
-              modelSpecificInstructions = applyPatchToolInstructions;
-            }
-            const mergedInstructions = [
-              prefix,
-              modelSpecificInstructions,
-              this.instructions,
-            ]
-              .filter(Boolean)
-              .join("\n");
-
-            const responseCall =
-              !this.config.provider ||
-              this.config.provider?.toLowerCase() === "openai"
-                ? (params: ResponseCreateParams) =>
-                    this.oai.responses.create(params)
-                : (params: ResponseCreateParams) =>
-                    responsesCreateViaChatCompletions(
-                      this.oai,
-                      params as ResponseCreateParams & { stream: true },
-                    );
+            const responseCall = (params: ResponseCreateParams) =>
+              modelApiAdapter.createResponse(this.oai, params, (message) => {
+                this.onItem({
+                  id: `adapter-${Date.now()}`,
+                  type: "message",
+                  role: "system",
+                  content: [{ type: "input_text", text: message }],
+                });
+              });
             log(
               `instructions (length ${mergedInstructions.length}): ${mergedInstructions}`,
             );
@@ -987,7 +987,7 @@ export class AgentLoop {
                         `Message: ${errCtx.message || "unknown"}`,
                       ].join(", ");
 
-                      return `⚠️  OpenAI rejected the request${
+                      return `⚠️  -- OpenAI rejected the request${
                         reqId ? ` (request ID: ${reqId})` : ""
                       }. Error details: ${errorDetails}. Please verify your settings and try again.`;
                     })(),
@@ -1186,16 +1186,8 @@ export class AgentLoop {
                 .filter(Boolean)
                 .join("\n");
 
-              const responseCall =
-                !this.config.provider ||
-                this.config.provider?.toLowerCase() === "openai"
-                  ? (params: ResponseCreateParams) =>
-                      this.oai.responses.create(params)
-                  : (params: ResponseCreateParams) =>
-                      responsesCreateViaChatCompletions(
-                        this.oai,
-                        params as ResponseCreateParams & { stream: true },
-                      );
+              const responseCall = (params: ResponseCreateParams) =>
+                modelApiAdapter.createResponse(this.oai, params);
 
               log(
                 "agentLoop.run(): responseCall(1): turnInput: " +
@@ -1511,7 +1503,6 @@ export class AgentLoop {
       if (isInvalidRequestError()) {
         try {
           // Extract request ID and error details from the error object
-
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const e: any = err;
 
