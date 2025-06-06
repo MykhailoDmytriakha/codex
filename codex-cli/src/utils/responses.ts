@@ -264,22 +264,33 @@ function convertTools(
 const createCompletion = (openai: OpenAI, input: ResponseCreateInput) => {
   const fullMessages = getFullMessages(input);
   const chatTools = convertTools(input.tools);
-  const webSearchOptions = input.tools?.some(
+
+  // Enable web search for search preview models or when web_search tool is present
+  const hasWebSearchTool = input.tools?.some(
     (tool) => tool.type === "function" && tool.name === "web_search",
-  )
-    ? {}
-    : undefined;
+  );
+  const isSearchPreviewModel = input.model.includes("search-preview");
+  const webSearchOptions =
+    hasWebSearchTool || isSearchPreviewModel ? {} : undefined;
+
+  // For search preview models, completely omit tools and tool_choice since they don't support function calling
+  const shouldOmitTools =
+    isSearchPreviewModel || !chatTools || chatTools.length === 0;
 
   const chatInput: OpenAI.Chat.Completions.ChatCompletionCreateParams = {
     model: input.model,
     messages: fullMessages,
-    tools: chatTools,
+    ...(shouldOmitTools ? {} : { tools: chatTools }),
     web_search_options: webSearchOptions,
     temperature: input.temperature,
     top_p: input.top_p,
-    tool_choice: (input.tool_choice === "auto"
-      ? "auto"
-      : input.tool_choice) as OpenAI.Chat.Completions.ChatCompletionCreateParams["tool_choice"],
+    ...(shouldOmitTools
+      ? {}
+      : {
+          tool_choice: (input.tool_choice === "auto"
+            ? "auto"
+            : input.tool_choice) as OpenAI.Chat.Completions.ChatCompletionCreateParams["tool_choice"],
+        }),
     stream: input.stream || false,
     user: input.user,
     metadata: input.metadata,
